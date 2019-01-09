@@ -1,4 +1,4 @@
-# Arete rule engine (version: 0.6.0)
+# Arete rule engine (version: 0.6.1)
 A Clojure implementation of a simple forward chaining rule engine. An
 engine is created by defining rules in one or more modules and
 invoking engine.core/engine on keywords defining the modules. Each
@@ -30,8 +30,8 @@ Example:
     {:service [{:type :service :name "s1"}]}
 
 The result of invoking :run [`<wme>`...] on an engine is to insert the
-specified working memory elements, run rules until no more will fire
-and then return a map of wme types to sequences of wmes.
+specified working memory elements (wmes), run rules until no more will
+fire and then return a map of wme types to sequences of wmes.
 
 ## Background
 This engine was originally created to help with translating between
@@ -55,7 +55,7 @@ would actually be relatively easy to do and will probably happen at
 some point if there's interest.
 
 ## Install
-The Arete engine is available from clojars as `[arete "0.6.0"]` or simply
+The Arete engine is available from clojars as `[arete "0.6.1"]` or simply
 download the repo, install leiningen if necessary, and run `lein
 uberjar`. The main class in the uberjar is the rule viewer for
 debugging. The engine itself has no command line.
@@ -78,10 +78,10 @@ Currently the commands supported by an engine are:
 
 * (`<engine>` :configure {`<setting>` `<value>`, ...}) - Turn on/off various
   settings for the engine:
-  * :debug true/false - Whether or not the engine should generate
-    debug messages
   * :log-rule-firings true/false - Whether or not to print the names
     of rules as they fire
+  * :max-repeated-firings `<n>` - How many times a single rule may
+    fire consecutively before it's considered stuck. (Defaults to 300).
   * :trace-set #{`<rule name>`, ...} - Set of rules whose execution
     should be traced
   * :stop-before #{`<rule name>`, ...} - Set of rules for which the
@@ -275,7 +275,7 @@ We'll run them by hand in the repl:
 
 Now let's run the viewer:
 
-    java -jar target/arete-0.6.0-standalone.jar /tmp/out
+    java -jar target/arete-0.6.1-standalone.jar /tmp/out
 
     Instantiations:
      :engine.factorial/fact (3*)
@@ -397,6 +397,170 @@ Now let's go to the end:
 Notice that once you're past the initial step, the previously fired
 rule is also displayed. The rest of the viewer functionality will be
 clear with a bit of experimentation.
+
+## Performance monitoring
+Timing of individual rules and more global properties of the engine
+can be obtained by setting the environment variable "DEBUG_COMPILE" to
+true and configuring the :enable-perf-mon flag to true. This
+will cause performance stats to be collected which can be viewed by
+invoking :timing on the engine after a run. With no argument or an
+argument of false, the timing data will get cleared after being
+requested. An argument of true will leave the data intact so it can be
+combined with data from other runs. The result of calling :timing is a
+CSV file written to stdout that can be imported into a
+spreadsheet. Something like:
+
+    finish-beta,29133401,100001,278837,209,291.33109668903313
+    create-instantiation,234105613,100002,127878,1705,2341.0093098138036
+    remove-pos-instantiation,280358199,100002,2561909,2142,2803.5259194816103
+    increment,434698310,200002,600855,297,2173.469815301847
+    rules,1018306095,400006,3263097,688,2545.727051594226
+    increment-body,216165513,100000,1865289,1609,2161.65513
+    body,250362454,100001,1866451,1882,2503.5995040049597
+    finish-body,53312,1,53312,53312,53312.0
+    remove-instantiation-inst-remove,60288971,100002,50316,443,602.8776524469511
+    alpha,179129354,400006,122936,323,447.81666774998376
+    instantiation-ordering,41489399,200004,42648,127,207.44284614307713
+    finish,391241373,200004,3196323,300,1956.167741645167
+    remove-instantiation-wme-loop,76970146,100002,2554643,522,769.6860662786744
+    beta,63759857,100001,2040271,470,637.5921940780593
+
+The columns are:
+
+`Name, Total Time, Number of Invocations, Max Time, Min Time, Mean Time`
+
+Currently, the engine internal data is mixed in with the data for user
+rules. At some point, the perf interface will be made more
+user-friendly; however it is already quite useful in its current
+state.
+
+The performance monitoring has very little overhead, particularly if
+the engine does not have it enabled and DEBUG_COMPILE was not
+set. However, if you want the absolute maximum speed for a deployed
+system, set the environment variable NO_PERF_COMPILE to true before
+building your application.
+
+## Inequality Optimization
+As in any non-toy rule engine, equal joins between LHS objects
+are turned into hash lookups. This means that the execution of a rule
+like:
+
+    (defrule join-example
+      [?obj1 :some-type]
+      [?obj2 :some-other-type
+       (= (:some-field ?obj1) (:some-other-field ?obj2))]
+      =>
+      (println "Found match:" ?obj1 "and" ?obj2))
+
+doesn't need to compare every instance of `:some-type` with every
+instance of `:some-other-type`. Instead, the wmes for
+`:some-other-type` are stored in a hash map keyed by the value of
+`:some-other-field`. When it's time to process an instance of
+`:some-type`, it is directly combined with instances of
+`:some-other-type` that result from a hash lookup of its `:some-field`
+value. In general, this is always worth doing as it completely avoids
+the normal cross product comparisons.
+
+The arete engine also implements a less common optimization that is
+not always useful, but _can_ be extremely so. Consider the following
+rule:
+
+    (defrule foo
+      [?ball1 :ball
+       (= (:pattern ?ball1) :stripe)]
+      [?ball2 :ball
+       (= (:pattern ?ball2) :solid)
+       (= (:color ?ball2) (:color ?ball1))
+       (> (:value ?ball2) (:value ?ball1))]
+      [?gurk :gurk (= (:value ?gurk) (:value ?ball2))]
+      =>
+      (insert! {:type :triple :ball1 (:value ?ball1) :ball2 (:value ?ball2)
+                :gurk (:value ?gurk)}))
+
+and the test:
+
+    (deftest big-cross
+      (testing "inequality performance"
+        (let [data (atom [])
+              eng (engine :engine.big-cross-test)]
+          (loop [i 0 j -9998]
+            (when (< i 10000)
+              (swap! data conj {:type :ball :pattern :stripe :color :red
+                                :value i})
+              (swap! data conj {:type :ball :pattern :solid :color :red
+                                :value j})
+              (recur (inc i) (inc j))))
+          (loop [g 0]
+            (when (< g 5)
+              (swap! data conj {:type :gurk :value g})
+              (recur (inc g))))
+          (time (eng :run-list @data)))))
+
+This inserts 9999 striped balls, 9999 solid balls, and 5 gurks. The
+values for striped and solid balls only overlap in one entry (0).
+
+When run on my laptop, this test takes nearly two minutes to run because
+each insertion of a gurk forces a full cross product evaluation of the
+two ball matches. This is something of a worst case scenario for arete
+since it does not save intermediate join results between
+executions (A RETE-based engine would have a similar problem if a
+new wme was added in a match higher in the LHS and would do much more
+work if "balls" rather than "gurks" were being added and removed). If we
+make one minor change, however:
+
+    (defrule foo
+      [?ball1 :ball
+       (= (:pattern ?ball1) :stripe)]
+      [?ball2 :ball
+       (= (:pattern ?ball2) :solid)
+       (= (:color ?ball2) (:color ?ball1))
+       (>> (:value ?ball2) (:value ?ball1))] ;; <- replace '>' with '>>'
+      [?gurk :gurk (= (:value ?gurk) (:value ?ball2))]
+      =>
+      (insert! {:type :triple :ball1 (:value ?ball1) :ball2 (:value ?ball2)
+                :gurk (:value ?gurk)}))
+
+it runs in less than 500 milliseconds. The optimization applied here
+inserts entries being joined via an inequality into Java TreeMaps so
+that the engine can iterate over the `headMap` of the map containing
+entries that match the inequality. The process has a fair bit of
+overhead, so it isn't automatically applied. To trigger the
+optimization, replace '>' with '>>', '<' with '<<', '>=' with '>>='
+and '<=' with '<<='. To see the worst case for the optimization,
+consider:
+
+    (defrule finish
+      {:priority 10}
+      [?limit :limit]
+      [?counter :counter (>= ^long (:value ?counter) ^long (:value ?limit))]
+      =>
+      (remove! ?limit)
+      (remove! ?counter)
+      (insert! {:type :result :value (:value ?counter)}))
+
+    (defrule increment
+      [?counter :counter]
+      =>
+      (remove! ?counter)
+      (insert! (update ?counter :value inc)))
+
+and:
+
+    (deftest performance-test
+      (testing "raw simmple rule performance"
+        (let [eng (engine :engine.speed-test)
+              _ (eng :configure {:max-repeated-firings 200000})
+              result (time (eng :run [{:type :limit :value 100000}
+                                      {:type :counter :value 0}]))]
+          (is (= (:value (first (:result result))) 100000)))))
+
+(BTW, note the use of `:max-repeated-firings`.)
+
+When run with '>=', this takes ~1.3 seconds. With '>>=', however, it
+takes: ~2.3 seconds. So, there's a tradeoff. If you're operating on
+large numbers of objects and you see slow behavior around an
+inequality, try replacing the operator with its TreeMap equivalent and
+you may see a _significant_ improvement.
 
 ## Implementation
 The engine is loosely based on the TREAT algorithm, though the
