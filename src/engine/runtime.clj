@@ -89,6 +89,27 @@
 (def rule-left-sides (atom {}))
 
 
+(defn oldest [inst1 inst2]
+  (let [id1 (:id ^PosInst inst1) id2 (:id ^PosInst inst2)]
+    (cond (< id1 id2) -1
+          (> id1 id2) 1
+          ;; only here because tree map compares an entry with itself when empty
+          :else 0)))
+
+(defn newest [inst1 inst2]
+  (let [id1 (:id ^PosInst inst1) id2 (:id ^PosInst inst2)]
+    (cond (> id1 id2) -1
+          (< id1 id2) 1
+          ;; only here because tree map compares an entry with itself when empty
+          :else 0)))
+
+;; Default conflict resolution strategy ("newest" by default; "oldest" for async engine to
+;; avoid starving any managed objects)
+(def ^:dynamic *base-strategy* newest)
+
+;; Whether or not the engine is running in an asynchronous loop
+(def ^:dynamic *async* false)
+
 ;; Configuration variables
 
 (declare ppwrap)
@@ -229,13 +250,6 @@
 
 (def orderings (atom {}))
 
-(defn newest [inst1 inst2]
-  (let [id1 (:id ^PosInst inst1) id2 (:id ^PosInst inst2)]
-    (cond (> id1 id2) -1
-          (< id1 id2) 1
-          ;; only here because tree map compares an entry with itself when empty
-          :else 0)))
-
 (def ^HashMap order-funs (make-map))
 
 (.put order-funs :without
@@ -327,7 +341,7 @@
 
 (defn combine-orders-aux [funs]
   (if (empty? funs)
-    newest
+    *base-strategy*
     (let [first-fun (first funs)
           tail (combine-orders-aux (rest funs))]
       (fn ^long [left right]

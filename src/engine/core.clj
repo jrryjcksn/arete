@@ -5,6 +5,7 @@
             [clojure.set :as set]
             [clojure.string :as str]
             [clojure.walk :as walk]
+            [clojure.core.async :as async]
             [flatland.ordered.set :as ordered]
             [clojure.java.io :as io]
             [potemkin :refer [import-vars]]
@@ -1073,6 +1074,8 @@
           omap (:osets rule-alpha-map)
           wmes (make-map)
           actions (make-queue)
+          notify (async/chan)
+          ready-items (atom [])
           instantiations (make-priority-map)
           insts-by-wme-id (make-map)
           rule-insts (make-map)
@@ -1212,7 +1215,19 @@
                           (reset! stop (run-instantiation inst))))
                       (if @stop
                         (reset! current-id @*current-id*)
-                        (recur))))))))]
+                        (recur))))))))
+          ;; Create an asynchronous processing handler
+          spawn #(async/go
+                   (loop []
+                     (async/<! notify)
+                     (let [[wmes _] (swap-vals! ready-items (constantly []))]
+                     (when (> (count wmes) 0)
+                       (cycle-action wmes))
+                     (recur))))
+          ;; Add data to asynchronous processor
+          async-add-wmes (fn [wmes]
+                           (swap! ready-items concat wmes)
+                           (async/>!! notify true))]
       (init-wmes)
       (let [eng (atom nil)]
         (reset! eng
@@ -1227,6 +1242,7 @@
                                        (let [result (get-wme-list wmes)]
                                          (clear)
                                          result))
+                         :add-wmes (async-add-wmes arg)
                          :cycle (cycle-action arg)
                          :configure (do (configure arg)
                                         @eng)
@@ -1240,4 +1256,9 @@
                      :wmes (get-wme-state wmes)
                      :wme-list (get-wme-list wmes)))))
         (reset! current-id @*current-id*)
+        (when *async* (spawn))
         @eng))))
+
+(defn spawn [& modules]
+  (binding [*async* true *base-strategy* oldest]
+    (apply engine modules)))

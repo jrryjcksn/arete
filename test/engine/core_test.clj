@@ -215,3 +215,17 @@
           (swap! data conj {:type :brong :value b})
           (recur (inc b))))
       (is (= (count (:triple (eng :run @data))) 175)))))
+
+(deftest spawned-engine
+  (testing "Spawned engine works correctly"
+    (let [eng (spawn :engine.spawn)]
+      (eng :add-wmes [{:type :result} {:type :x :value 20}])
+      (eng :add-wmes [{:type :x :value 17}])
+      (eng :add-wmes [{:type :x :value 85}])
+      (eng :add-wmes [{:type :x :value 200}])
+      (eng :add-wmes [{:type :y}])
+      (loop []
+        (Thread/sleep 5)
+        (when-not (= (count (:value (first (:result (eng :wmes))))) 4)
+          (recur)))
+      (is (= (:value (first (:result (eng :wmes)))) [20 17 85 200])))))
