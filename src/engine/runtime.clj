@@ -8,7 +8,7 @@
             [flatland.ordered.set :as ordered]
             [clojure.java.io :as io])
   (:import [org.javasimon SimonManager Stopwatch]
-           [java.util Map HashMap TreeSet TreeMap TreeMap$Entry
+           [java.util Map HashMap Hashtable TreeSet TreeMap TreeMap$Entry
             TreeMap$DescendingSubMap Comparator ArrayDeque]
            clojure.lang.PersistentVector))
 
@@ -43,8 +43,11 @@
 (def ^:dynamic *stop-after* nil)
 (def ^:dynamic *run-before* nil)
 (def ^:dynamic *run-after* nil)
+(def ^:dynamic *alphas* nil)
 (def ^:dynamic *alpha-rems* nil)
+(def ^:dynamic *omap* nil)
 (def ^:dynamic *wmes* nil)
+(def ^:dynamic *ids* nil)
 (def ^:dynamic *actions* nil)
 (def ^:dynamic *instantiations* nil)
 (def ^:dynamic *insts-by-wme-id* nil)
@@ -195,7 +198,14 @@
 
 ;; Associate an id with a newly inserted wme and turn it into a Wme record
 (defn add-id [wme]
-  (let [updated (assoc wme :__id (new-id))]
+  (let [wme-id (:___id ^Wme wme)
+        internal-id (if-let [saved-id (get ^map @*ids* wme-id)]
+                      saved-id
+                      (let [generated (new-id)]
+                        (when wme-id
+                          (swap! *ids* assoc wme-id generated))
+                        generated))
+        updated (assoc wme :__id internal-id)]
     (if (= (type wme) Wme)
       updated
       (map->Wme updated))))
@@ -963,11 +973,11 @@
     (simon-stop split)))
 
 (defn get-wme-state [^HashMap wmes]
-  (dissoc (group-by :type (map #(dissoc ^Wme % :__id) (.values wmes))) :_start))
+  (dissoc (group-by :type (map #(dissoc ^Wme % :__id :___id) (.values wmes))) :_start))
 
 (defn get-wme-list [^HashMap wmes]
   (vec (filter #(not= (:type ^Wme %) :_start)
-               (map #(dissoc ^Wme % :__id) (.values wmes)))))
+               (map #(dissoc ^Wme % :__id :___id) (.values wmes)))))
 
 (defmacro firing-debug [rule-output-name vars]
   `(do
@@ -983,7 +993,7 @@
         nand-records (.get ^HashMap *nand-records-by-wme-id* id)
         types ^PersistentVector (wme-types wme)]
     (doseq [wme-type types]
-      (doseq [alpha-rem (wme-type *alpha-rems*)]
+      (doseq [alpha-rem (wme-type @*alpha-rems*)]
         (alpha-rem wme)))
     (doseq [nr nand-records]
       (remove-nand-record nr))
@@ -992,24 +1002,27 @@
 
 (defn process-pending-wme-actions [alphas ^ArrayDeque actions ^HashMap wme-map]
   (loop []
-    (when-not (.isEmpty actions)
-      (let [[action ^Wme wme] (.remove actions)
-            types (wme-types wme)
-            id (:__id wme)]
-        (try
-          (case action
-            :add (do (.put wme-map id wme)
-                     (doseq [wme-type types]
-                       (doseq [addfun (wme-type alphas)] (addfun wme))))
-            :remove (do
-                      (remove-wme-from-alphas-and-insts wme)
-                      (.remove wme-map id)))
-          (catch Exception e
-            (binding [*out* *err*]
-              (println (str "Error processing wme: " (to-map wme)))
-              (.printStackTrace e))
-            (throw e))))
-      (recur))))
+      (when-not (.isEmpty actions)
+        (let [[action ^Wme wme] (.remove actions)
+              types (wme-types wme)
+              id (:__id wme)]
+          (try
+            (case action
+              :add (do (.put wme-map id wme)
+                       (doseq [wme-type types]
+                         (doseq [addfun (wme-type alphas)] (addfun wme))))
+              :remove (do (remove-wme-from-alphas-and-insts wme)
+                          (.remove wme-map id)
+                          (swap! *ids* dissoc (:___id wme)))
+              :update (do (remove-wme-from-alphas-and-insts wme)
+                          (doseq [wme-type types]
+                            (doseq [addfun (wme-type alphas)] (addfun wme)))))
+            (catch Exception e
+              (binding [*out* *err*]
+                (println (str "Error processing wme: " (to-map wme)))
+                (.printStackTrace e))
+              (throw e))))
+        (recur))))
 
 (defn run-instantiation [^PosInst inst]
   (let [rule (:rule inst)]
@@ -1042,6 +1055,12 @@
   (doseq [input-wme wme-list]
     (.add actions [:add (add-id input-wme)])))
 
+;; Add "update" actions for a set of wmes to the action queue; they will
+;; be added when we process pending actions.
+(defn update-wmes-impl [wme-list ^ArrayDeque actions]
+  (doseq [input-wme wme-list]
+    (.add actions [:update (add-id input-wme)])))
+
 ;; Insert initial argument wmes into the current engine for this thread
 (defn insert-top-level-wmes [wme-list]
   (doseq [wme wme-list]
@@ -1051,6 +1070,16 @@
                 (str "Working memory element must contain :type field: "
                      (vec wme)))))))
   (insert-wmes-impl wme-list *actions*))
+
+;; Update wmes in the current engine for this thread
+(defn update-top-level-wmes [wme-list]
+  (doseq [wme wme-list]
+    (let [typ (get wme :type)]
+      (if (not (keyword? typ))
+        (throw (RuntimeException.
+                (str "Working memory element must contain :type field: "
+                     (vec wme)))))))
+  (update-wmes-impl wme-list *actions*))
 
 ;; Display the results of performance monitoring in csv format for
 ;; spreadsheet analysis

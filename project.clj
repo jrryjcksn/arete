@@ -10,7 +10,10 @@
                  [potemkin "0.4.5"]
                  [org.clojure/data.json "0.2.6"]
                  [org.javasimon/javasimon-core "4.1.3"]
-                 [org.clojure/core.async "1.3.610"]]
+                 [org.clojure/core.async "1.3.610"]
+                 [javax.xml.bind/jaxb-api "2.4.0-b180830.0359"]
+;                 [nubank/kubernetes-api "1.4.0"]]
+                                 [kubernetes-api "0.1.0"]]
   :profiles {:uberjar {:aot :all}}
   :deploy-repositories [["releases"
                          {:sign-releases false :url "https://clojars.org/repo"}]
