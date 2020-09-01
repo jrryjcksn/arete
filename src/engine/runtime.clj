@@ -1014,7 +1014,8 @@
               :remove (do (remove-wme-from-alphas-and-insts wme)
                           (.remove wme-map id)
                           (swap! *ids* dissoc (:___id wme)))
-              :update (do (remove-wme-from-alphas-and-insts wme)
+              :update (do (.put wme-map id wme)
+                          (remove-wme-from-alphas-and-insts wme)
                           (doseq [wme-type types]
                             (doseq [addfun (wme-type alphas)] (addfun wme)))))
             (catch Exception e

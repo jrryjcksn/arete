@@ -1109,6 +1109,7 @@
           actions (make-queue)
           notify (async/chan)
           active (atom false)
+          isAsync (atom false)
           ready-adds (atom [])
           ready-deletes (atom [])
           ready-updates (atom [])
@@ -1181,6 +1182,7 @@
           ;; be used to maintain intermediate state.
           cycle-action
           (fn [input-wmes removed-wmes updated-wmes]
+            (locking active (reset! active true))
             (binding [;*current-id* (atom ^long @current-id)
                       *current-id* current-id
                       *logging-set* ^set @logging-set
@@ -1228,7 +1230,6 @@
                   (before)))
               (let [rule-just-run (atom nil)
                     loop-counter (atom 0)]
-                (locking active (reset! active true))
                 ;; Main rule loop
                 (loop []
                   (if (and (empty? actions) (empty? instantiations))
@@ -1237,7 +1238,11 @@
                           (when-let [after (:after (@contexts (keyword mod)))]
                             (after)))
                         (maybe-dump)
-                        (get-wme-state wmes))
+                        (let [state (get-wme-state wmes)]
+                          (locking active
+                            (reset! active false)
+                            (.notifyAll active)
+                            state)))
                     (let [stop (atom false)]
                       ;; Process any changes to wmes made during last rule
                       (process-pending-wme-actions @alphas actions wmes)
@@ -1265,37 +1270,43 @@
                       (if @stop
                         (locking active
                           (reset! active false)
-                          (.notify active))
+                          (.notifyAll active))
                         (recur))))))))
           ;; Create an asynchronous processing handler
-          spawn #(async/go
-                   (loop []
-                     (async/<! notify)
-                     (let [[wmes _] (swap-vals! ready-adds (constantly []))
-                           [removes _] (swap-vals! ready-deletes (constantly []))
-                           [updates _] (swap-vals! ready-updates (constantly []))]
-                       (when (or (> (count removes) 0)
-                                 (> (count wmes) 0)
-                                 (> (count updates) 0))
-                         (cycle-action wmes removes updates))
-                       (recur))))
+          spawn #(do (reset! isAsync true)
+                     (async/go
+                       (loop []
+                         (async/<! notify)
+                         (let [[wmes _] (swap-vals! ready-adds (constantly []))
+                               [removes _] (swap-vals! ready-deletes (constantly []))
+                               [updates _] (swap-vals! ready-updates (constantly []))]
+                           (when (or (> (count removes) 0)
+                                     (> (count wmes) 0)
+                                     (> (count updates) 0))
+                             (cycle-action wmes removes updates))
+                           (recur)))))
+          ;; Check if engine is running asynchronously
+          ensure-async #(when-not @isAsync
+                          (throw (RuntimeException. (str "Engine is not running as a server"))))
           ;; Add data to asynchronous processor
           async-add-wmes (fn [wmes]
+                           (ensure-async)
                            (swap! ready-adds concat
                                   (doall
                                    (map (fn [wme]
                                           (if-let [id (@id-func wme)]
-                                              (do (when (get ^map @external-ids id)
-                                                    (throw (RuntimeException.
-                                                            (str "Wme: "
-                                                                 wme
-                                                                 " already has an associated "
-                                                                 "external id"))))
-                                                  (assoc wme :___id id))
-                                              wme))
+                                            (do (when (get ^map @external-ids id)
+                                                  (throw (RuntimeException.
+                                                          (str "Wme: "
+                                                               wme
+                                                               " already has an associated "
+                                                               "external id"))))
+                                                (assoc wme :___id id))
+                                            wme))
                                         wmes)))
                            (async/>!! notify true))
           async-update-wmes (fn [wmes]
+                              (ensure-async)
                               (let [updated
                                     (doall
                                      (map
@@ -1311,6 +1322,7 @@
                                 (swap! ready-updates concat updated)
                                 (async/>!! notify true)))
           async-remove-wmes (fn [wmes]
+                              (ensure-async)
                               (swap! ready-deletes concat
                                      (doall
                                       (map
@@ -1323,6 +1335,47 @@
                                                      (str "No id specified for wme "
                                                           "to remove: " wme))))))
                                        wmes)))
+                              (async/>!! notify true))
+          async-batch-wme-ops (fn [wmes]
+                                (ensure-async)
+                                (swap! ready-deletes concat
+                                     (doall
+                                      (map
+                                       (fn [wme]
+                                         (binding [*ids* external-ids
+                                                   *current-id* current-id]
+                                           (if-let [id (@id-func wme)]
+                                             (add-id (assoc wme :___id id))
+                                             (throw (RuntimeException.
+                                                     (str "No id specified for wme "
+                                                          "to remove: " wme))))))
+                                       (:removes wmes))))
+                                (let [updated
+                                      (doall
+                                       (map
+                                        (fn [wme]
+                                          (binding [*ids* external-ids
+                                                    *current-id* current-id]
+                                            (if-let [id (@id-func wme)]
+                                              (add-id (assoc wme :___id id))
+                                              (throw (RuntimeException.
+                                                      (str "No id specified for wme "
+                                                           "to update: " wme))))))
+                                        (:updates wmes)))]
+                                  (swap! ready-updates concat updated))
+                                (swap! ready-adds concat
+                                       (doall
+                                        (map (fn [wme]
+                                               (if-let [id (@id-func wme)]
+                                                 (do (when (get ^map @external-ids id)
+                                                       (throw (RuntimeException.
+                                                               (str "Wme: "
+                                                                    wme
+                                                                    " already has an associated "
+                                                                    "external id"))))
+                                                     (assoc wme :___id id))
+                                                 wme))
+                                             (:adds wmes))))
                               (async/>!! notify true))]
       (init-wmes)
       (let [eng (atom nil)]
@@ -1341,6 +1394,7 @@
                          :add-wmes (async-add-wmes arg)
                          :update-wmes (async-update-wmes arg)
                          :remove-wmes (async-remove-wmes arg)
+                         :batch-wme-ops (async-batch-wme-ops arg)
                          :cycle (cycle-action arg [] [])
                          :configure (do (configure arg)
                                         @eng)
@@ -1350,7 +1404,13 @@
                          (throw e))))
                   ([action]
                    (case action
-                     :wait (locking active (when-not @active (.wait active)))
+                     :wait (locking active (when (or @active
+                                                     (not (and (empty? actions)
+                                                               (empty? instantiations)
+                                                               (empty? @ready-deletes)
+                                                               (empty? @ready-adds)
+                                                               (empty? @ready-updates))))
+                                             (.wait active)))
                      :timing (display-timing)
                      :wmes (get-wme-state wmes)
                      :wme-list (get-wme-list wmes)))))
