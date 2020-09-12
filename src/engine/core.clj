@@ -1017,16 +1017,14 @@
   (let [rule-alpha-map (alphas-by-wme-type rule-alpha-list)
         funs {:alphas (update-all rule-alpha-map #(map first %))
               :alpha-rems (update-all rule-alpha-map #(map second %))
-              :osets (update-all rule-alpha-map #(map third %))}
-        merger (fn [& args] (apply merge-with concat args))]
+              :osets (update-all rule-alpha-map #(map third %))}]
     ;; alphas = {:x (<add fun> <add fun> ...) :y (<add fun> <add fun> ...) ...}
-                                        ;    (swap! *alphas* merger (:alphas funs))
     (swap! *alphas* #(merge-with concat % (:alphas funs)))
     (swap! *alpha-rems* #(merge-with concat % (:alpha-rems funs)))
     (swap! *omap* #(merge-with concat % (:osets funs)))
     ;; for each existing wme
     (doseq [wme (vals *wmes*)]
-      (when-not (= rule-id (:__id  wme))
+      (when-not (= rule-id (:__id wme))
         ;; for each type it satisfies
         (doseq [wme-type (wme-types wme)]
           ;; call the type-specific add functions (if any) for that type
@@ -1037,7 +1035,8 @@
   (reduce
    (fn [result-map rule-alpha-list]
      (let [rule-alpha-map (alphas-by-wme-type rule-alpha-list)
-           ;; rule-alpha-map = {:x (<add fun> <remove fun> {object sets?}) :y (<add fun> <remove fun> {object sets?}) ...}
+           ;; rule-alpha-map = {:x (<add fun> <remove fun> {object sets?})
+           ;;                   :y (<add fun> <remove fun> {object sets?}) ...}
            ;; {:ball1 <alpha1> <alpha2>}
            funs {:alphas (update-all rule-alpha-map #(map first %))
                  :alpha-rems (update-all rule-alpha-map #(map second %))

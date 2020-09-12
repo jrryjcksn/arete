@@ -9,10 +9,13 @@
             [compojure.route :as route]
             [compojure.core :refer [routes GET POST PUT DELETE]]
             [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.walk :as walk]
             [clojure.data.json :as json]
+            [clojure.edn :as edn]
             [clojure.tools.logging :as log]
-            [engine.core :as eng]))
+            [engine.core :as eng]
+            engine.dynamic))
 
 (def ^:dynamic *engine* nil)
 
@@ -121,12 +124,39 @@
 (defn handler [modules config-map]
   (let [engine (apply eng/spawn modules)]
     (engine :configure config-map)
-    ((wrap-fallback-exception engine)
-     (-> api-routes handler/api wrap-params))))
+    [engine ((wrap-fallback-exception engine)
+             (-> api-routes handler/api wrap-params))]))
+
+(defn- ensure-dynamic [modules]
+  (conj (remove #{:engine.dynamic} (map keyword (vec modules))) :engine.dynamic))
+
+(defn run
+  ([modules]
+   (run modules {}))
+  ([modules config-map]
+   (let [engine (apply eng/spawn (ensure-dynamic modules))]
+     (engine :configure config-map)
+     engine)))
 
 (defn start
   ([modules]
    (start modules {}))
   ([modules config-map]
    (println "Running jetty...")
-   (jetty/run-jetty (handler modules config-map) {:port 3000 :join? false})))
+   (let [[eng handler-fun] (handler (ensure-dynamic modules) config-map)]
+     (jetty/run-jetty handler-fun {:port 3000 :join? false})
+     eng)))
+
+(defn -main [& config-and-modules]
+  (let [[config modules] (reduce (fn [[c m] i]
+                                   (if (str/index-of i "=")
+                                     (let [[k v] (str/split i #"=")]
+                                       [(assoc c (keyword k) (eval (edn/read-string v))) m])
+                                     [c (conj m i)]))
+                                 [{} []]
+                                 config-and-modules)]
+    [config modules]
+    [config-and-modules config modules]
+    (start modules config)))
+
+
