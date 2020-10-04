@@ -6,7 +6,8 @@
             [clojure.string :as str]
             [clojure.walk :as walk]
             [flatland.ordered.set :as ordered]
-            [clojure.java.io :as io])
+            [clojure.java.io :as io]
+            [com.rpl.specter :refer :all])
   (:import [org.javasimon SimonManager Stopwatch]
            [java.util Map HashMap Hashtable TreeSet TreeMap TreeMap$Entry
             TreeMap$DescendingSubMap Comparator ArrayDeque]
@@ -256,7 +257,7 @@
   (with-simon "remove-prefix-ref"
     (if (= (count prefix) 1)
       (dissoc trie (first prefix))
-      (update-in trie (pop prefix) dissoc (last prefix)))))
+      (setval (apply must (pop prefix)) NONE trie))))
 
 (def orderings (atom {}))
 
@@ -848,7 +849,8 @@
     ;; Add to insts for network
     (when-not (empty? (:nands inst))
       (let [imap (.get rule-insts net-name)
-            existing (or (get (get-prefix-ref imap (:wmes inst)) 0) [])]
+            ;;            existing (or (get (get-prefix-ref imap (:wmes inst)) 0) [])]
+            existing (or (select [(apply must (:wmes inst)) (must 0)] imap) [])]
         (.put rule-insts net-name
               (add-prefix-ref imap (:wmes inst) (conj existing inst)))))
     (if entry
@@ -1036,13 +1038,22 @@
           (before-fun (.values ^HashMap *wmes*)))
         (when-not (empty? nands)
           (let [nand-records *nand-records*]
-            (doseq [nand nands]
-              (when-let [nr ^Nand (get-sub-nand-record
-                                   nand-records (first nand)
-                                   (subvec (:wmes inst) 0 (second nand)))]
-                (debugf "Marking: %s dead"
-                        (with-out-str (pprint/pprint nr)))
-                (reset! (:state nr) :dead)))))
+;;            (doseq [nand nands]
+              (pmap
+               (fn [nand]
+                 (when-let [nr ^Nand (get-sub-nand-record
+                                      nand-records (first nand)
+                                      (subvec (:wmes inst) 0 (second nand)))]
+                   (debugf "Marking: %s dead"
+                           (with-out-str (pprint/pprint nr)))
+                   (reset! (:state nr) :dead)))
+               nands)))
+              ;; (when-let [nr ^Nand (get-sub-nand-record
+              ;;                      nand-records (first nand)
+              ;;                      (subvec (:wmes inst) 0 (second nand)))]
+              ;;   (debugf "Marking: %s dead"
+              ;;           (with-out-str (pprint/pprint nr)))
+              ;;   (reset! (:state nr) :dead)))))
         ((:fun inst))
         (config-contains *stop-after* rule)))))
 

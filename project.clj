@@ -20,7 +20,8 @@
                  [liberator "0.15.1"]
                  [compojure "1.6.0"]
                  [ring/ring-jetty-adapter "1.6.2"]
-                 [ring/ring-core "1.6.2"]]
+                 [ring/ring-core "1.6.2"]
+                 [com.rpl/specter "1.1.3"]]
   :jvm-opts ["-XX:+IgnoreUnrecognizedVMOptions" "--add-modules java.xml.bind"]
   :profiles {:uberjar {:aot :all}}
   :deploy-repositories [["releases"

@@ -12,7 +12,8 @@
             [engine.runtime
              :refer :all
              :exclude [get-stack-trace ppwrap wme-types >> << >>= <<=]]
-            [engine.viewer :refer [view]])
+            [engine.viewer :as viewer]
+            [com.rpl.specter :refer :all])
   (:import [org.javasimon SimonManager Stopwatch]
            [java.util HashMap TreeSet TreeMap TreeMap$Entry
             TreeMap$DescendingSubMap Comparator ArrayDeque]
@@ -999,25 +1000,30 @@
        @rulesets)))
 
 
-(defn process-alphas [rule-alpha-map result-map]
-  ;; {:ball1 <alpha1> <alpha2>}
-  (let [funs {:alphas (update-all rule-alpha-map #(map first %))
-              :alpha-rems (update-all rule-alpha-map #(map second %))
-              :osets (update-all rule-alpha-map #(map third %))}]
-    (merge-with #(merge-with concat %1 %2) result-map funs)))
+;; (defn process-alphas [rule-alpha-map result-map]
+;;   ;; {:ball1 <alpha1> <alpha2>}
+;;   (let [funs {:alphas (update-all rule-alpha-map #(map first %))
+;;               :alpha-rems (update-all rule-alpha-map #(map second %))
+;;               :osets (update-all rule-alpha-map #(map third %))}]
+;;     (merge-with #(merge-with concat %1 %2) result-map funs)))
 
 ;; Code to construct rule functions at engine creation time
 (defn alphas-by-wme-type [rule-alpha-list]
+  ;; after executing functions:
+  ;;
+  ;; {:ball [[<add fun> <remove fun> <obj set>], ...]
+  ;;  :gurk [[<add fun> <remove fun> <obj set>], ...]}
+  ;;
+  ;; one add/rem/set triple for each instance of the type on the left
+  ;; hand side
   (apply merge-with concat (map #(%) rule-alpha-list)))
-
-(def stuff (atom nil))
 
 ;; Update engine after new rule added
 (defn update-with-rule [rule-id rule-alpha-list]
   (let [rule-alpha-map (alphas-by-wme-type rule-alpha-list)
-        funs {:alphas (update-all rule-alpha-map #(map first %))
-              :alpha-rems (update-all rule-alpha-map #(map second %))
-              :osets (update-all rule-alpha-map #(map third %))}]
+        funs {:alphas (transform [MAP-VALS ALL] first rule-alpha-map)
+              :alpha-rems (transform [MAP-VALS ALL] second rule-alpha-map)
+              :osets (transform [MAP-VALS ALL] third rule-alpha-map)}]
     ;; alphas = {:x (<add fun> <add fun> ...) :y (<add fun> <add fun> ...) ...}
     (swap! *alphas* #(merge-with concat % (:alphas funs)))
     (swap! *alpha-rems* #(merge-with concat % (:alpha-rems funs)))
@@ -1038,9 +1044,10 @@
            ;; rule-alpha-map = {:x (<add fun> <remove fun> {object sets?})
            ;;                   :y (<add fun> <remove fun> {object sets?}) ...}
            ;; {:ball1 <alpha1> <alpha2>}
-           funs {:alphas (update-all rule-alpha-map #(map first %))
-                 :alpha-rems (update-all rule-alpha-map #(map second %))
-                 :osets (update-all rule-alpha-map #(map third %))}]
+           funs {;;:alphas (update-all rule-alpha-map #(map first %))
+                 :alphas (transform [MAP-VALS ALL] first rule-alpha-map)
+                 :alpha-rems (transform [MAP-VALS ALL] second rule-alpha-map)
+                 :osets (transform [MAP-VALS ALL] third rule-alpha-map)}]
        (merge-with #(merge-with concat %1 %2) result-map funs)))
    {}
    rulesets))
@@ -1172,7 +1179,7 @@
                            :type
                            (mapv to-map (vals *wmes*)))})
                         (if (= recording-file true)
-                          (view @history)
+                          (viewer/view @history)
                           (dump-recording @history @rules-by-name
                                           @rule-left-sides
                                           recording-file)))
