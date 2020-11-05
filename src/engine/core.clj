@@ -747,10 +747,19 @@
                        (fn [m k]
                          (update m k
                                  (fn [vals]
-                                   (mapv #(vector (first (:add %))
-                                                  (first (:rem %))
-                                                  (first (:oset %)))
+                                   (mapv (fn [x] `(->TypeData '~rule-name
+                                                              ~(first (:add x))
+                                                              ~(first (:rem x))
+                                                              ~(first (:oset x))))
                                          vals))))
+                                ;; (mapv #(ppwrap :NTD (vector (first (:add %))
+                                ;;                (first (:rem %))
+                                ;;                (first (:oset %))))
+                                ;;       vals))))
+                                   ;; (mapv #(vector (first (:add %))
+                                   ;;                (first (:rem %))
+                                   ;;                (first (:oset %)))
+                                   ;;       vals))))
                        groups
                        (keys groups)))}))
 
@@ -909,7 +918,17 @@
 ;; Construct a live rule instance from a network of LHS nodes and RHS body.
 ;; The resulting function will get invoked at engine creation time to create
 ;; a set of variables and functions invokable from the engine.
-(defn build-rule [network]
+;;
+;; Returns a function that returns:
+;;
+;; MAP{<wme-type>,[[<addfun>, <remfun>, <varname>], ...]}
+;; where <varname> holds the instances
+;;
+;; e.g.:
+;;
+;;
+
+(defn build-rule [rule-name network]
   (let [all-nodes (filter (fn [node] (or (= (:type node) :obj-node)
                                          (= (:type node) :nand-node)))
                           (:nodes network))
@@ -937,10 +956,19 @@
                     (fn [m k]
                       (update m k
                               (fn [vals]
-                                (mapv #(vector (first (:add %))
-                                               (first (:rem %))
-                                               (first (:oset %)))
+                                (mapv (fn [x] `(->TypeData '~rule-name
+                                                           ~(first (:add x))
+                                                           ~(first (:rem x))
+                                                           ~(first (:oset x))))
                                       vals))))
+                                ;; (mapv #(ppwrap :NTD (vector (first (:add %))
+                                ;;                (first (:rem %))
+                                ;;                (first (:oset %))))
+                                ;;       vals))))
+                                ;; (mapv #(vector (first (:add %))
+                                ;;                (first (:rem %))
+                                ;;                (first (:oset %)))
+                                ;;       vals))))
                     obj-groups
                     (keys obj-groups))
                    (map :subnet-groups nand-nodes)))))))
@@ -981,15 +1009,15 @@
 
 ;; Macro providing 'defrule' syntax
 (defmacro defrule [& body]
-  (let [rule (build-rule (extract-network body))
-        name-field (first body)
+  (let [name-field (first body)
         rule-name (if (str/includes? name-field "/")
                         (str (namespace name-field) "/" (name name-field))
                         (str (ns-name *ns*) "/" name-field))
         ruleset-name (if (str/includes? name-field "/")
                         (keyword (namespace name-field))
                         (keyword (ns-name *ns*)))
-        priority (get-priority body)]
+        priority (get-priority body)
+        rule (build-rule rule-name (extract-network body))]
     (binding [*out* *err*]
       (println (str "Compiling " rule-name)))
     (when @show-rule-bodies (pprint/pprint rule))
@@ -1021,9 +1049,9 @@
 ;; Update engine after new rule added
 (defn update-with-rule [rule-id rule-alpha-list]
   (let [rule-alpha-map (alphas-by-wme-type rule-alpha-list)
-        funs {:alphas (transform [MAP-VALS ALL] first rule-alpha-map)
-              :alpha-rems (transform [MAP-VALS ALL] second rule-alpha-map)
-              :osets (transform [MAP-VALS ALL] third rule-alpha-map)}]
+           funs {:alphas (transform [MAP-VALS ALL] :add-fun rule-alpha-map)
+                 :alpha-rems (transform [MAP-VALS ALL] :rem-fun rule-alpha-map)
+                 :osets (transform [MAP-VALS ALL] :oset rule-alpha-map)}]
     ;; alphas = {:x (<add fun> <add fun> ...) :y (<add fun> <add fun> ...) ...}
     (swap! *alphas* #(merge-with concat % (:alphas funs)))
     (swap! *alpha-rems* #(merge-with concat % (:alpha-rems funs)))
@@ -1041,13 +1069,12 @@
   (reduce
    (fn [result-map rule-alpha-list]
      (let [rule-alpha-map (alphas-by-wme-type rule-alpha-list)
-           ;; rule-alpha-map = {:x (<add fun> <remove fun> {object sets?})
-           ;;                   :y (<add fun> <remove fun> {object sets?}) ...}
+           ;; rule-alpha-map={:x TypeData{:add-fun <add fun> :rem-fun <remove fun> :oset {object sets?}}
+           ;;                 :y TypeData{:add-fun <add fun> :rem-fun <remove fun> :oset {object sets?}}}
            ;; {:ball1 <alpha1> <alpha2>}
-           funs {;;:alphas (update-all rule-alpha-map #(map first %))
-                 :alphas (transform [MAP-VALS ALL] first rule-alpha-map)
-                 :alpha-rems (transform [MAP-VALS ALL] second rule-alpha-map)
-                 :osets (transform [MAP-VALS ALL] third rule-alpha-map)}]
+           funs {:alphas (transform [MAP-VALS ALL] :add-fun rule-alpha-map)
+                 :alpha-rems (transform [MAP-VALS ALL] :rem-fun rule-alpha-map)
+                 :osets (transform [MAP-VALS ALL] :oset rule-alpha-map)}]
        (merge-with #(merge-with concat %1 %2) result-map funs)))
    {}
    rulesets))
@@ -1107,7 +1134,7 @@
           ;; Core data for engine runtime
           id-func (atom (constantly nil))
           external-ids (atom {})
-          rule-alpha-map (extract-alphas rsets)
+          rule-alpha-map (ppwrap :RAM (extract-alphas rsets))
           alphas (atom (:alphas rule-alpha-map))
           alpha-rems (atom (:alpha-rems rule-alpha-map))
           omap (atom (:osets rule-alpha-map))

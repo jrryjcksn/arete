@@ -65,6 +65,9 @@
 ;; Each wme *must* contain at least __id and type
 (defrecord Wme [^long __id ^clojure.lang.Keyword type])
 
+;; Data for managing a wme type in a rule
+(defrecord TypeData [rule-name add-fun rem-fun oset])
+
 ;; Holds the set of variables bound by object matches farther up the
 ;; left-hand side so that they can be plugged in during execution of a
 ;; nested negated conjunction
