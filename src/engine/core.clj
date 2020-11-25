@@ -17,6 +17,7 @@
   (:import [org.javasimon SimonManager Stopwatch]
            [java.util HashMap TreeSet TreeMap TreeMap$Entry
             TreeMap$DescendingSubMap Comparator ArrayDeque]
+           engine.runtime.OwnedHashMap
            clojure.lang.PersistentVector))
 
 ;; Variables from runtime that we want to expose from core (using the Potemkin
@@ -747,19 +748,11 @@
                        (fn [m k]
                          (update m k
                                  (fn [vals]
-                                   (mapv (fn [x] `(->TypeData '~rule-name
+                                   (mapv (fn [x] `(->TypeData ~rname-string
                                                               ~(first (:add x))
                                                               ~(first (:rem x))
                                                               ~(first (:oset x))))
                                          vals))))
-                                ;; (mapv #(ppwrap :NTD (vector (first (:add %))
-                                ;;                (first (:rem %))
-                                ;;                (first (:oset %))))
-                                ;;       vals))))
-                                   ;; (mapv #(vector (first (:add %))
-                                   ;;                (first (:rem %))
-                                   ;;                (first (:oset %)))
-                                   ;;       vals))))
                        groups
                        (keys groups)))}))
 
@@ -956,19 +949,11 @@
                     (fn [m k]
                       (update m k
                               (fn [vals]
-                                (mapv (fn [x] `(->TypeData '~rule-name
+                                (mapv (fn [x] `(->TypeData ~rule-name
                                                            ~(first (:add x))
                                                            ~(first (:rem x))
                                                            ~(first (:oset x))))
                                       vals))))
-                                ;; (mapv #(ppwrap :NTD (vector (first (:add %))
-                                ;;                (first (:rem %))
-                                ;;                (first (:oset %))))
-                                ;;       vals))))
-                                ;; (mapv #(vector (first (:add %))
-                                ;;                (first (:rem %))
-                                ;;                (first (:oset %)))
-                                ;;       vals))))
                     obj-groups
                     (keys obj-groups))
                    (map :subnet-groups nand-nodes)))))))
@@ -1065,6 +1050,16 @@
           ;; associated with the new rule
           (doseq [addfun (wme-type (:alphas funs))] (addfun wme)))))))
 
+(defn map-annotate [k]
+  (fn [l]
+    (doall
+     (map (fn [x]
+            (let [val (k x)]
+              (if (instance? OwnedHashMap val)
+                (do (.setOwner val (:rule-name x)) val)
+                (with-meta val {:rule (:rule-name x)}))))
+          l))))
+
 (defn extract-alphas [rulesets]
   (reduce
    (fn [result-map rule-alpha-list]
@@ -1072,9 +1067,9 @@
            ;; rule-alpha-map={:x TypeData{:add-fun <add fun> :rem-fun <remove fun> :oset {object sets?}}
            ;;                 :y TypeData{:add-fun <add fun> :rem-fun <remove fun> :oset {object sets?}}}
            ;; {:ball1 <alpha1> <alpha2>}
-           funs {:alphas (transform [MAP-VALS ALL] :add-fun rule-alpha-map)
-                 :alpha-rems (transform [MAP-VALS ALL] :rem-fun rule-alpha-map)
-                 :osets (transform [MAP-VALS ALL] :oset rule-alpha-map)}]
+           funs {:alphas (update-all rule-alpha-map (map-annotate :add-fun))
+                 :alpha-rems (update-all rule-alpha-map (map-annotate :rem-fun))
+                 :osets (update-all rule-alpha-map (map-annotate :oset))}]
        (merge-with #(merge-with concat %1 %2) result-map funs)))
    {}
    rulesets))
@@ -1134,7 +1129,7 @@
           ;; Core data for engine runtime
           id-func (atom (constantly nil))
           external-ids (atom {})
-          rule-alpha-map (ppwrap :RAM (extract-alphas rsets))
+          rule-alpha-map (extract-alphas rsets)
           alphas (atom (:alphas rule-alpha-map))
           alpha-rems (atom (:alpha-rems rule-alpha-map))
           omap (atom (:osets rule-alpha-map))

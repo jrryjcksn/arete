@@ -13,6 +13,19 @@
             TreeMap$DescendingSubMap Comparator ArrayDeque]
            clojure.lang.PersistentVector))
 
+(defn owned-hash-init []
+  [[] (atom {})])
+
+(defn owned-hash-getOwner [this] @(.metadata this))
+(defn owned-hash-setOwner [this owner] (reset! (.metadata this) owner))
+
+(gen-class :name "engine.runtime.OwnedHashMap"
+           :extends java.util.HashMap
+           :prefix "owned-hash-"
+           :init "init"
+           :state "metadata"
+           :methods [[getOwner [] String] [setOwner [String] void]])
+
 (def default-record-file "/tmp/_engine_fail_output_")
 
 ;; Make sure we don't leave any performance on the table by accidentally
@@ -187,7 +200,7 @@
 (defn third [x] (nth x 2))
 
 ;; Functions to create useful Java data structures
-(defn make-map ^HashMap [] (HashMap.))
+(defn make-map ^HashMap [] (engine.runtime.OwnedHashMap.))
 
 (defn make-queue ^ArrayDeque [] (ArrayDeque.))
 
