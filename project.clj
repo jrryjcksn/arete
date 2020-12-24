@@ -6,6 +6,15 @@
   :main engine.viewer
   :dependencies [[org.clojure/clojure "1.10.0"]
                  [org.flatland/ordered "1.5.7"]
+                 [szew/h2 "0.3.2"]
+                 ;; https://mvnrepository.com/artifact/com.h2database/h2
+                 [com.h2database/h2 "1.4.200"]
+                 ;; The must: database interop
+                 [org.clojure/java.jdbc "0.7.11"]
+                 ;; Next gen database interop
+                 [seancorfield/next.jdbc "1.1.547"]
+                 ;; https://mvnrepository.com/artifact/com.github.jsqlparser/jsqlparser
+                 [com.github.jsqlparser/jsqlparser "3.2"]
                  [clj-yaml "0.4.0"]
                  [potemkin "0.4.5"]
                  [org.clojure/data.json "0.2.6"]

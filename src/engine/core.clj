@@ -14,6 +14,7 @@
              :exclude [get-stack-trace ppwrap wme-types >> << >>= <<=]]
             [engine.viewer :refer [view]])
   (:import [org.javasimon SimonManager Stopwatch]
+           net.sf.jsqlparser.parser.CCJSqlParserUtil
            [java.util HashMap TreeSet TreeMap TreeMap$Entry
             TreeMap$DescendingSubMap Comparator ArrayDeque]
            clojure.lang.PersistentVector))
@@ -833,6 +834,125 @@
                      (inc neg-index)))
 
             true {:n nodes :v vars :net net}))))
+
+;; parse SQL
+
+(defn parse-sql [sql] (net.sf.jsqlparser.parser.CCJSqlParserUtil/parse sql))
+
+(defn get-where [parsed-select] (.getWhere (.getSelectBody parsed-select)))
+
+(defn get-tables [parsed-select]
+  (let [body (.getSelectBody parsed-select)
+        tables (into #{(.getName (.getFromItem body))}
+                     (map (fn [join] (.getName (.getRightItem join))) (.getJoins body)))]
+    tables))
+
+(defn get-variables [parsed-select]
+  (let [body (.getSelectBody parsed-select)
+        items (.getSelectItems body)]
+    (first
+     (reduce (fn [[vars idx] possible]
+               (if-let [alias (.getAlias possible)]
+                 (let [alias-name (str/replace (.getName alias) "\"" "")]
+                   [(conj vars [idx alias-name]) (inc idx)])
+                 [vars (inc idx)]))
+             [[] 0]
+             items))))
+
+(defn get-primary-keys [schema-str]
+  (let [entries (map str/trim (str/split schema-str #";"))
+        tables (filter (fn [s] (str/starts-with? (str/upper-case s) "CREATE TABLE"))
+                       entries)]
+    (reduce (fn [key-map table]
+              (let [[_ table-name table-spec] (re-matches #".*CREATE[ ]+TABLE[ ]+([^ ]+)[^(]+[(]([^)]*)[)].*" table)
+                    columns (str/split table-spec #",")]
+                (loop [cols columns]
+                  (ppwrap :cols cols)
+                  (if (empty? cols)
+                    (assoc key-map table-name nil)
+                    (do (ppwrap :fc (first cols))
+                    (if-let [[_ name] (re-matches #"[ ]*([^ ]+).*PRIMARY[ ]+KEY.*" (str/upper-case (first cols)))]
+                      (ppwrap :found (assoc key-map table-name name))
+                      (recur (rest cols))))))))
+            {}
+            tables)))
+
+(defn compute-table [col col-tables]
+  (if-let [tab (.getTable (.getExpression col))]
+    (.getName tab)
+    (get col-tables (.getColumnName (.getExpression col)))))
+
+(defn get-specified-primary-keys [parsed-select primary-key-map col-table-map]
+  (let [body (.getSelectBody parsed-select)
+        items (.getSelectItems body)]
+    (first
+     (reduce (fn [[keys idx] item]
+               (let [table (compute-table item col-table-map)
+                     key (get primary-key-map table)]
+                 (if (= key (.getColumnName (.getExpression item)))
+                   [(assoc keys table idx) (inc idx)]
+                   [keys (inc idx)])))
+             [{} 0]
+             items))))
+
+(defn update-with-primary-keys [parsed-select]
+
+  )
+
+(defn is-and? [exp] (instance? net.sf.jsqlparser.expression.operators.conditional.AndExpression exp))
+(defn is-or? [exp] (instance? net.sf.jsqlparser.expression.operators.conditional.OrExpression exp))
+
+(defmulti collect-sql-items (fn [c _] (class c)))
+
+(defmethod collect-sql-items
+  net.sf.jsqlparser.expression.BinaryExpression [be fun]
+  (concat (if (fun be) [be] [])
+          (collect-sql-items (.getLeftExpression be) fun)
+          (collect-sql-items (.getRightExpression be) fun)))
+
+(defmethod collect-sql-items
+  net.sf.jsqlparser.expression.ArrayExpression [ae fun]
+  (concat (if (fun ae) [ae] [])
+          (collect-sql-items (.getObjExpression ae) fun)))
+
+(defmethod collect-sql-items :default [e fun]
+  (if (fun e) [e] []))
+
+(defn single-wme? [exp col-tables]
+  (let [columns
+        (collect-sql-items
+         exp
+         (fn [e] (instance? net.sf.jsqlparser.schema.Column e)))
+
+        [tables single-wme]
+        (loop [col-list columns tables #{} is-single? true]
+          (if (empty? col-list)
+              [tables is-single?]
+              (let [c (first col-list)
+                    name (.getColumnName c)
+                    table (compute-table c col-tables)
+                    new-tables (conj tables table)]
+                (recur (rest col-list) new-tables (<= (count new-tables) 1)))))]
+    single-wme))
+
+(defn flatten-and [exp]
+  (if (is-and? exp)
+    (concat (flatten-and (.getLeftExpression exp)) (flatten-and (.getRightExpression exp)))
+    [exp]))
+
+(defn split-tests [select-exp-str col-tables]
+  (let [parsed (parse-sql select-exp-str)
+        where (get-where parsed)]
+    (cond (is-and? where)
+          (group-by #(if (single-wme? % col-tables) :single :join) (flatten-and where))
+          ;; (is-or? where) Should split query w/ top level OR into multiple queries before
+          ;; all else
+
+          (single-wme? where col-tables)
+          [where]
+
+          :else
+          [])))
 
 ;; Extract pieces of a rule
 
