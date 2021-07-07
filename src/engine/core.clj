@@ -12,10 +12,12 @@
             [engine.runtime
              :refer :all
              :exclude [get-stack-trace ppwrap wme-types >> << >>= <<=]]
-            [engine.viewer :refer [view]])
+            [engine.viewer :as viewer]
+            [com.rpl.specter :refer :all])
   (:import [org.javasimon SimonManager Stopwatch]
            [java.util HashMap TreeSet TreeMap TreeMap$Entry
             TreeMap$DescendingSubMap Comparator ArrayDeque]
+           engine.runtime.OwnedHashMap
            clojure.lang.PersistentVector))
 
 ;; Variables from runtime that we want to expose from core (using the Potemkin
@@ -231,7 +233,7 @@
                  (if outer-vars
                    [`(let [~@outer-var-sublist engine.runtime/*outer-vars*]
                        ~uie-exp)]
-                 [uie-exp]))
+                   [uie-exp]))
              (fn ~sub-fun
                [~@outer-var-sublist ~wme-var]
                (~down ~@outer-var-sublist ~@(conj vars wme-var)))))))
@@ -267,12 +269,12 @@
                  (if outer-vars
                    [`(let [~@outer-var-sublist engine.runtime/*outer-vars*]
                        ~uhash-exp)]
-                 [uhash-exp]))
+                   [uhash-exp]))
              ~@(when uie-exp
                  (if outer-vars
                    [`(let [~@outer-var-sublist engine.runtime/*outer-vars*]
                        ~uie-exp)]
-                 [uie-exp]))
+                   [uie-exp]))
              ;; beta tests
              ~(if @compile-with-debug
                 `(fn ~sub-fun [~@outer-var-sublist ~wme-var]
@@ -416,7 +418,7 @@
                   (if @compile-with-debug
                     `(~alpha-rem-name
                       (debug-alpha-rem-fun ~rname-string '~alpha-name ~oset
-                                     ~luie-fun ~empty-count-name))
+                                           ~luie-fun ~empty-count-name))
                     `(~alpha-rem-name
                       (alpha-rem-fun ~oset ~luie-fun ~empty-count-name))))
         ;; function to feed alpha values to beta tests
@@ -746,9 +748,10 @@
                        (fn [m k]
                          (update m k
                                  (fn [vals]
-                                   (mapv #(vector (first (:add %))
-                                                  (first (:rem %))
-                                                  (first (:oset %)))
+                                   (mapv (fn [x] `(->TypeData ~rname-string
+                                                              ~(first (:add x))
+                                                              ~(first (:rem x))
+                                                              ~(first (:oset x))))
                                          vals))))
                        groups
                        (keys groups)))}))
@@ -786,7 +789,7 @@
                                          ~@(rest net)
                                          (simon-stop rsplit#)
                                          (simon-stop split#)))
-                                    (rest net)))))
+                                     (rest net)))))
                            `(fn ~(gensym "neg-conj-body-")
                               ;; In an inner network
                               ;; outer vars come from surrounding networks
@@ -850,7 +853,7 @@
       ruletail)))
 
 (defn extract-network [rule]
-  (let [rname-str (str (nth rule 0))
+  (let [rname-str (last (str/split (str (nth rule 0)) #"[/]"))
         rule-name (gensym (str rname-str "-"))
         empty-count (gensym "empty-count-")
         rule-output-name (str (ns-name *ns*) "/" rname-str)]
@@ -889,7 +892,7 @@
     (let [tests (nthrest omatch 2)]
       (if (empty? tests)
         '()
-      `((and ~@tests))))))
+        `((and ~@tests))))))
 
 (defn get-lhs-exp [lhs]
   (let [tests (mapcat get-match-exp lhs)]
@@ -908,7 +911,17 @@
 ;; Construct a live rule instance from a network of LHS nodes and RHS body.
 ;; The resulting function will get invoked at engine creation time to create
 ;; a set of variables and functions invokable from the engine.
-(defn build-rule [network]
+;;
+;; Returns a function that returns:
+;;
+;; MAP{<wme-type>,[[<addfun>, <remfun>, <varname>], ...]}
+;; where <varname> holds the instances
+;;
+;; e.g.:
+;;
+;;
+
+(defn build-rule [rule-name network]
   (let [all-nodes (filter (fn [node] (or (= (:type node) :obj-node)
                                          (= (:type node) :nand-node)))
                           (:nodes network))
@@ -936,9 +949,10 @@
                     (fn [m k]
                       (update m k
                               (fn [vals]
-                                (mapv #(vector (first (:add %))
-                                               (first (:rem %))
-                                               (first (:oset %)))
+                                (mapv (fn [x] `(->TypeData ~rule-name
+                                                           ~(first (:add x))
+                                                           ~(first (:rem x))
+                                                           ~(first (:oset x))))
                                       vals))))
                     obj-groups
                     (keys obj-groups))
@@ -980,31 +994,82 @@
 
 ;; Macro providing 'defrule' syntax
 (defmacro defrule [& body]
-  (let [rule (build-rule (extract-network body))
-        ruleset-name (keyword (ns-name *ns*))
-        priority (get-priority body)]
+  (let [name-field (first body)
+        rule-name (if (str/includes? name-field "/")
+                        (str (namespace name-field) "/" (name name-field))
+                        (str (ns-name *ns*) "/" name-field))
+        ruleset-name (if (str/includes? name-field "/")
+                        (keyword (namespace name-field))
+                        (keyword (ns-name *ns*)))
+        priority (get-priority body)
+        rule (build-rule rule-name (extract-network body))]
     (binding [*out* *err*]
-      (println (str "Compiling " (ns-name *ns*) "/" (first body))))
+      (println (str "Compiling " rule-name)))
     (when @show-rule-bodies (pprint/pprint rule))
-    `(let [ruleset# (or (@rulesets ~ruleset-name) [])
-           rule-name# (str (ns-name *ns*) "/" '~(first body))]
-       (swap! rulesets #(assoc % ~ruleset-name (conj ruleset# ~rule)))
-       (swap! rules-by-name #(assoc % rule-name# '~(cons 'defrule body)))
-       (swap! rule-left-sides #(assoc % rule-name# '~(build-lhs-exp body)))
+    `(let [ruleset# (or (@rulesets ~ruleset-name) [])]
+       (swap! rulesets assoc ~ruleset-name (conj ruleset# ~rule))
+       (swap! rules-by-name assoc ~rule-name '~(cons 'defrule body))
+       (swap! rule-left-sides assoc ~rule-name '~(build-lhs-exp body))
        @rulesets)))
+
+
+;; (defn process-alphas [rule-alpha-map result-map]
+;;   ;; {:ball1 <alpha1> <alpha2>}
+;;   (let [funs {:alphas (update-all rule-alpha-map #(map first %))
+;;               :alpha-rems (update-all rule-alpha-map #(map second %))
+;;               :osets (update-all rule-alpha-map #(map third %))}]
+;;     (merge-with #(merge-with concat %1 %2) result-map funs)))
 
 ;; Code to construct rule functions at engine creation time
 (defn alphas-by-wme-type [rule-alpha-list]
-  (apply merge-with concat (map (fn [f] (f)) rule-alpha-list)))
+  ;; after executing functions:
+  ;;
+  ;; {:ball [[<add fun> <remove fun> <obj set>], ...]
+  ;;  :gurk [[<add fun> <remove fun> <obj set>], ...]}
+  ;;
+  ;; one add/rem/set triple for each instance of the type on the left
+  ;; hand side
+  (apply merge-with concat (map #(%) rule-alpha-list)))
+
+;; Update engine after new rule added
+(defn update-with-rule [rule-id rule-alpha-list]
+  (let [rule-alpha-map (alphas-by-wme-type rule-alpha-list)
+           funs {:alphas (transform [MAP-VALS ALL] :add-fun rule-alpha-map)
+                 :alpha-rems (transform [MAP-VALS ALL] :rem-fun rule-alpha-map)
+                 :osets (transform [MAP-VALS ALL] :oset rule-alpha-map)}]
+    ;; alphas = {:x (<add fun> <add fun> ...) :y (<add fun> <add fun> ...) ...}
+    (swap! *alphas* #(merge-with concat % (:alphas funs)))
+    (swap! *alpha-rems* #(merge-with concat % (:alpha-rems funs)))
+    (swap! *omap* #(merge-with concat % (:osets funs)))
+    ;; for each existing wme
+    (doseq [wme (vals *wmes*)]
+      (when-not (= rule-id (:__id wme))
+        ;; for each type it satisfies
+        (doseq [wme-type (wme-types wme)]
+          ;; call the type-specific add functions (if any) for that type
+          ;; associated with the new rule
+          (doseq [addfun (wme-type (:alphas funs))] (addfun wme)))))))
+
+(defn map-annotate [k]
+  (fn [l]
+    (doall
+     (map (fn [x]
+            (let [val (k x)]
+              (if (instance? OwnedHashMap val)
+                (do (.setOwner val (:rule-name x)) val)
+                (with-meta val {:rule (:rule-name x)}))))
+          l))))
 
 (defn extract-alphas [rulesets]
   (reduce
    (fn [result-map rule-alpha-list]
      (let [rule-alpha-map (alphas-by-wme-type rule-alpha-list)
+           ;; rule-alpha-map={:x TypeData{:add-fun <add fun> :rem-fun <remove fun> :oset {object sets?}}
+           ;;                 :y TypeData{:add-fun <add fun> :rem-fun <remove fun> :oset {object sets?}}}
            ;; {:ball1 <alpha1> <alpha2>}
-           funs {:alphas (update-all rule-alpha-map #(map first %))
-                 :alpha-rems (update-all rule-alpha-map #(map second %))
-                 :osets (update-all rule-alpha-map #(map third %))}]
+           funs {:alphas (update-all rule-alpha-map (map-annotate :add-fun))
+                 :alpha-rems (update-all rule-alpha-map (map-annotate :rem-fun))
+                 :osets (update-all rule-alpha-map (map-annotate :oset))}]
        (merge-with #(merge-with concat %1 %2) result-map funs)))
    {}
    rulesets))
@@ -1060,22 +1125,22 @@
                                                      modules))]
                          (fn [] (make-ordered-set ordering)))
           ;; Construct all rule functions
-          rsets (map (fn [mod]
-                       (let [rset (@rulesets (keyword mod))]
-                         (if (empty? rset)
-                           (throw (RuntimeException.
-                                   (str mod " contains no rules.")))
-                           rset)))
-                     modules)
+          rsets (map (fn [mod] (@rulesets (keyword mod))) modules)
           ;; Core data for engine runtime
+          id-func (atom (constantly nil))
+          external-ids (atom {})
           rule-alpha-map (extract-alphas rsets)
-          alphas (:alphas rule-alpha-map)
-          alpha-rems (:alpha-rems rule-alpha-map)
-          omap (:osets rule-alpha-map)
+          alphas (atom (:alphas rule-alpha-map))
+          alpha-rems (atom (:alpha-rems rule-alpha-map))
+          omap (atom (:osets rule-alpha-map))
           wmes (make-map)
           actions (make-queue)
           notify (async/chan)
-          ready-items (atom [])
+          active (atom false)
+          isAsync (atom false)
+          ready-adds (atom [])
+          ready-deletes (atom [])
+          ready-updates (atom [])
           instantiations (make-priority-map)
           insts-by-wme-id (make-map)
           rule-insts (make-map)
@@ -1089,6 +1154,8 @@
           ;; map argument
           configure (fn [config-map]
                       (reset! record (:record config-map))
+                      (when-let [idfun (:id-function config-map)]
+                        (reset! id-func idfun))
                       (when (:debug config-map)
                         (reset! logging-set (conj @logging-set :debug)))
                       (reset! echo-firings (or (:log-rule-firings config-map)
@@ -1102,10 +1169,12 @@
                       (when-let [val (:max-repeated-firings config-map)]
                         (reset! max-identical val)))
           ;; Init the rule engine with a start action for rules w/o LHSs
-          init-wmes (fn [] (insert-wmes-impl [{:type :_start}] actions))
+          init-wmes (fn []
+                      (binding [*ids* external-ids]
+                        (insert-wmes-impl [{:type :_start}] actions)))
           ;; Reset the rule engine state; done before each new "run"
           clear (fn []
-                  (doseq [[_ v] omap]
+                  (doseq [[_ v] @omap]
                     (doseq [oset v]
                       (.clear ^HashMap oset)))
                   (.clear wmes)
@@ -1124,24 +1193,26 @@
                     (reset! current-id @*current-id*)))
           ;; Should we record output?
           maybe-dump #(when-let [recording-file @record]
-                                   (swap!
-                                    history
-                                    conj
-                                    {:wmes
-                                     (group-by
-                                      :type
-                                      (mapv to-map (vals *wmes*)))})
-                                    (if (= recording-file true)
-                                      (view @history)
-                                      (dump-recording @history @rules-by-name
-                                                      @rule-left-sides
-                                                      recording-file)))
+                        (swap!
+                         history
+                         conj
+                         {:wmes
+                          (group-by
+                           :type
+                           (mapv to-map (vals *wmes*)))})
+                        (if (= recording-file true)
+                          (viewer/view @history)
+                          (dump-recording @history @rules-by-name
+                                          @rule-left-sides
+                                          recording-file)))
           ;; Main function run to process rules; used by run, run-map, run-list.
           ;; If called directly, does not clear engine between calls and can
           ;; be used to maintain intermediate state.
           cycle-action
-          (fn [input-wmes]
-            (binding [*current-id* (atom ^long @current-id)
+          (fn [input-wmes removed-wmes updated-wmes]
+            (locking active (reset! active true))
+            (binding [;*current-id* (atom ^long @current-id)
+                      *current-id* current-id
                       *logging-set* ^set @logging-set
                       *trace-set* ^set @trace-set
                       *echo-firings* @echo-firings
@@ -1149,8 +1220,11 @@
                       *stop-after* @stop-after
                       *run-before* @run-before
                       *run-after* @run-after
+                      *alphas* alphas
                       *alpha-rems* alpha-rems
+                      *omap* omap
                       *wmes* ^HashMap wmes
+                      *ids* ^map external-ids
                       *actions* ^ArrayDeque actions
                       *instantiations* ^TreeMap$DescendingSubMap instantiations
                       *insts-by-wme-id* ^HashMap insts-by-wme-id
@@ -1174,6 +1248,10 @@
               (cond (= @record true) (io/delete-file default-record-file true)
                     (not (nil? @record)) (io/delete-file @record true))
               ;; Beginning of real execution
+              (doseq [rem removed-wmes]
+                (.add ^ArrayDeque actions [:remove rem]))
+              (doseq [upd updated-wmes]
+                (.add ^ArrayDeque actions [:update upd]))
               (insert-top-level-wmes input-wmes)
               (doseq [mod modules]
                 (when-let [before (:before (@contexts (keyword mod)))]
@@ -1188,10 +1266,14 @@
                           (when-let [after (:after (@contexts (keyword mod)))]
                             (after)))
                         (maybe-dump)
-                        (get-wme-state wmes))
+                        (let [state (get-wme-state wmes)]
+                          (locking active
+                            (reset! active false)
+                            (.notifyAll active)
+                            state)))
                     (let [stop (atom false)]
                       ;; Process any changes to wmes made during last rule
-                      (process-pending-wme-actions alphas actions wmes)
+                      (process-pending-wme-actions @alphas actions wmes)
                       (when-let [after-fun @run-after]
                         (when @rule-just-run
                           (after-fun @rule-just-run (vals wmes))))
@@ -1214,20 +1296,115 @@
                                    (:wmes inst)])
                           (reset! stop (run-instantiation inst))))
                       (if @stop
-                        (reset! current-id @*current-id*)
+                        (locking active
+                          (reset! active false)
+                          (.notifyAll active))
                         (recur))))))))
           ;; Create an asynchronous processing handler
-          spawn #(async/go
-                   (loop []
-                     (async/<! notify)
-                     (let [[wmes _] (swap-vals! ready-items (constantly []))]
-                     (when (> (count wmes) 0)
-                       (cycle-action wmes))
-                     (recur))))
+          spawn #(do (reset! isAsync true)
+                     (async/go
+                       (loop []
+                         (async/<! notify)
+                         (let [[wmes _] (swap-vals! ready-adds (constantly []))
+                               [removes _] (swap-vals! ready-deletes (constantly []))
+                               [updates _] (swap-vals! ready-updates (constantly []))]
+                           (when (or (> (count removes) 0)
+                                     (> (count wmes) 0)
+                                     (> (count updates) 0))
+                             (cycle-action wmes removes updates))
+                           (recur)))))
+          ;; Check if engine is running asynchronously
+          ensure-async #(when-not @isAsync
+                          (throw (RuntimeException. (str "Engine is not running as a server"))))
           ;; Add data to asynchronous processor
           async-add-wmes (fn [wmes]
-                           (swap! ready-items concat wmes)
-                           (async/>!! notify true))]
+                           (ensure-async)
+                           (swap! ready-adds concat
+                                  (doall
+                                   (map (fn [wme]
+                                          (if-let [id (@id-func wme)]
+                                            (do (when (get ^map @external-ids id)
+                                                  (throw (RuntimeException.
+                                                          (str "Wme: "
+                                                               wme
+                                                               " already has an associated "
+                                                               "external id"))))
+                                                (assoc wme :___id id))
+                                            wme))
+                                        wmes)))
+                           (async/>!! notify true))
+          async-update-wmes (fn [wmes]
+                              (ensure-async)
+                              (let [updated
+                                    (doall
+                                     (map
+                                      (fn [wme]
+                                        (binding [*ids* external-ids
+                                                  *current-id* current-id]
+                                          (if-let [id (@id-func wme)]
+                                            (add-id (assoc wme :___id id))
+                                            (throw (RuntimeException.
+                                                    (str "No id specified for wme "
+                                                         "to update: " wme))))))
+                                      wmes))]
+                                (swap! ready-updates concat updated)
+                                (async/>!! notify true)))
+          async-remove-wmes (fn [wmes]
+                              (ensure-async)
+                              (swap! ready-deletes concat
+                                     (doall
+                                      (map
+                                       (fn [wme]
+                                         (binding [*ids* external-ids
+                                                   *current-id* current-id]
+                                           (if-let [id (@id-func wme)]
+                                             (add-id (assoc wme :___id id))
+                                             (throw (RuntimeException.
+                                                     (str "No id specified for wme "
+                                                          "to remove: " wme))))))
+                                       wmes)))
+                              (async/>!! notify true))
+          async-batch-wme-ops (fn [wmes]
+                                (ensure-async)
+                                (swap! ready-deletes concat
+                                     (doall
+                                      (map
+                                       (fn [wme]
+                                         (binding [*ids* external-ids
+                                                   *current-id* current-id]
+                                           (if-let [id (@id-func wme)]
+                                             (add-id (assoc wme :___id id))
+                                             (throw (RuntimeException.
+                                                     (str "No id specified for wme "
+                                                          "to remove: " wme))))))
+                                       (:removes wmes))))
+                                (let [updated
+                                      (doall
+                                       (map
+                                        (fn [wme]
+                                          (binding [*ids* external-ids
+                                                    *current-id* current-id]
+                                            (if-let [id (@id-func wme)]
+                                              (add-id (assoc wme :___id id))
+                                              (throw (RuntimeException.
+                                                      (str "No id specified for wme "
+                                                           "to update: " wme))))))
+                                        (:updates wmes)))]
+                                  (swap! ready-updates concat updated))
+                                (swap! ready-adds concat
+                                       (doall
+                                        (map (fn [wme]
+                                               (if-let [id (@id-func wme)]
+                                                 (do (when (get ^map @external-ids id)
+                                                       (throw (RuntimeException.
+                                                               (str "Wme: "
+                                                                    wme
+                                                                    " already has an associated "
+                                                                    "external id"))))
+                                                     (assoc wme :___id id))
+                                                 wme))
+                                             (:adds wmes))))
+                              (async/>!! notify true))]
       (init-wmes)
       (let [eng (atom nil)]
         (reset! eng
@@ -1235,15 +1412,18 @@
                 (fn ([action arg]
                      (try
                        (case action
-                         (:run :run-map) (let [result (cycle-action arg)]
+                         (:run :run-map) (let [result (cycle-action arg [] [])]
                                            (clear)
                                            result)
-                         :run-list (do (cycle-action arg)
+                         :run-list (do (cycle-action arg [] [])
                                        (let [result (get-wme-list wmes)]
                                          (clear)
                                          result))
                          :add-wmes (async-add-wmes arg)
-                         :cycle (cycle-action arg)
+                         :update-wmes (async-update-wmes arg)
+                         :remove-wmes (async-remove-wmes arg)
+                         :batch-wme-ops (async-batch-wme-ops arg)
+                         :cycle (cycle-action arg [] [])
                          :configure (do (configure arg)
                                         @eng)
                          :timing (display-timing arg))
@@ -1252,6 +1432,13 @@
                          (throw e))))
                   ([action]
                    (case action
+                     :wait (locking active (when (or @active
+                                                     (not (and (empty? actions)
+                                                               (empty? instantiations)
+                                                               (empty? @ready-deletes)
+                                                               (empty? @ready-adds)
+                                                               (empty? @ready-updates))))
+                                             (.wait active)))
                      :timing (display-timing)
                      :wmes (get-wme-state wmes)
                      :wme-list (get-wme-list wmes)))))

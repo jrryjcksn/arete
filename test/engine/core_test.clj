@@ -182,11 +182,6 @@
       (is (= (count (:order result)) 2))
       (is (= (count (:order2 result)) 0)))))
 
-(deftest empty-modules
-  (testing "Creating an engine with a module containing no rules raises an error"
-    (is (thrown-with-msg? RuntimeException #":engine.core-test contains no rules."
-                          (engine :engine.core-test)))))
-
 (deftest context
   (testing "Rule module context - before function, after function, bound data"
     (let [result ((engine :engine.context-test) :run [])]
@@ -229,3 +224,14 @@
         (when-not (= (count (:value (first (:result (eng :wmes))))) 4)
           (recur)))
       (is (= (:value (first (:result (eng :wmes)))) [20 17 85 200])))))
+
+(deftest spawned-engine2
+  (testing "Updating and removing wmes works correctly"
+    (let [eng (spawn :engine.viewer)]
+      (eng :configure {:id-function :id})
+      (eng :add-wmes [{:type :x :id 6} {:type :x :id 28}])
+      (eng :update-wmes [{:type :x :id 28 :foo "yes"}])
+      (eng :remove-wmes [{:type :x :id 28 :foo "yes"}])
+      (eng :wait)
+      (is (= (count (:x (eng :wmes))) 1))
+      (is (= (first (:x (eng :wmes))) {:type :x :id 6})))))
